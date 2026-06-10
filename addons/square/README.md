@@ -26,7 +26,7 @@ single Godot `Node` (`SquareLaunchMonitor`) that the autoload
 | `SquareCommandBuilder.cs` | Builds outbound command byte frames (`Heartbeat`, `DetectBall`, `Club`). |
 | `SquareConnectionOptions.cs` | UUIDs, device-name prefix, and connection/heartbeat timing constants. |
 | `SquareShotMetrics.cs` | Parsed shot/sensor value records. |
-| `SquareShotDataMapper.cs` | Maps `SquareShotMetrics` → OSG/GSPro ball-data dictionary (units + clamp). |
+| `SquareShotDataMapper.cs` | Maps `SquareShotMetrics` → ball-data dictionary (units + clamp). |
 | `SquareGodotMapper.cs` | Wraps the mapper output into a Godot `Dictionary`. |
 | `square_club_catalog.gd` | Club label → 2-byte Square code lookup (`SquareClubCatalog`). |
 | [`PROTOCOL.md`](PROTOCOL.md) | Reverse-engineered BLE protocol notes. |
@@ -64,7 +64,8 @@ table is in [`PROTOCOL.md` §A.5](PROTOCOL.md). Notes:
 
 ## Building & testing
 
-The integration is C#. Build with the project's C# solution
-(`dotnet build OpenShotGolf.csproj`) or by opening the project in Godot.
+The integration is C#. Build with the host project's C# solution
+(`dotnet build <HostProject>.csproj`) or by opening the project in Godot.
 `IBluetoothGattClient` is the seam to mock for unit tests; protocol parsing in
-`SquareProtocol` is pure and unit-testable without hardware.
+`SquareProtocol` is pure and unit-testable without hardware (see this repo's
+`tests/` project).

@@ -7,7 +7,7 @@ public static class SquareGodotMapper
 {
     public static GodotDictionary ToBallData(SquareShotMetrics metrics)
     {
-        var values = SquareShotDataMapper.ToOsgBallData(metrics);
+        var values = SquareShotDataMapper.ToBallData(metrics);
         var data = new GodotDictionary();
 
         foreach (var item in values)

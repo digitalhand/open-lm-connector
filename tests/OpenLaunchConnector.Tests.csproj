@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Standalone test harness for the addon's pure C# code. This repo has no build
+    of its own; only Godot-free sources are linked in here so SquareProtocol can
+    be exercised without Godot or hardware. Godot-dependent files (the Node
+    entrypoints, transports, SquareGodotMapper) are intentionally not included.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../addons/square/SquareProtocol.cs" Link="Square/SquareProtocol.cs" />
+    <Compile Include="../addons/square/SquareShotMetrics.cs" Link="Square/SquareShotMetrics.cs" />
+    <Compile Include="../addons/square/SquareShotDataMapper.cs" Link="Square/SquareShotDataMapper.cs" />
+  </ItemGroup>
+
+</Project>

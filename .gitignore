@@ -1,0 +1,58 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Godot-specific ignores
+.import/
+export.cfg
+#export_presets.cfg
+export_credentials.cfg
+
+# Imported translations
+*.translation
+
+# Mono-specific ignores
+.mono/
+data_*/
+mono_crash.*.json
+.claude
+
+# IDE Specific, used for code analytics outside of Godot IDE. 
+.vscode
+
+*addons/terrain_3d/bin/*
+!addons/terrain_3d/bin/libterrain.linux.debug.x86_64.so
+!addons/terrain_3d/bin/libterrain.linux.release.x86_64.so
+!addons/terrain_3d/bin/libterrain.windows.debug.x86_64.dll
+!addons/terrain_3d/bin/libterrain.windows.release.x86_64.dll
+
+gut_temp/
+gut_logs/
+
+tests/PhysicsTests/bin/*
+tests/PhysicsTests/obj/*
+
+# Standalone C# test harness for the addon's pure code
+tests/bin/
+tests/obj/
+
+*.claude
+CLAUDE.md
+AGENTS.md
+
+*.tmp
+
+.venv
+*.env
+
+__pycache__/
+debug_runs/
+
+# Calibration debug artifacts
+tools/shot_calibration/debug_fs.html
+tools/shot_calibration/debug_fs.png
+
+CLAUDE.local.md
+.DS_Store
+CLAUDE*
+*.claude

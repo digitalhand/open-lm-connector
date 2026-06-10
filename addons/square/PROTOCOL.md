@@ -18,11 +18,11 @@ observing the device's BLE traffic alongside the official client.
 ### A.1 Transport
 
 - BLE GATT, accessed through `LaunchMonitors.Common.Bluetooth.IBluetoothGattClient`
-  (`addons/launch_monitors/common/bluetooth/`). The factory picks the per-OS
+  (the addon's `common/bluetooth/`). The factory picks the per-OS
   implementation:
   - Linux → BlueZ via D-Bus (`Tmds.DBus`).
   - Windows → `Windows.Devices.Bluetooth` (WinRT), loaded reflectively and only
-    compiled on Windows builds (see `OpenShotGolf.csproj`).
+    compiled on Windows builds (see the host project's `.csproj`).
 - Device discovery is name-prefix filtered. The vendor's advertising name starts
   with `SquareGolf` (see `SquareConnectionOptions.Default`).
 - Four characteristics are used. The canonical UUIDs are in
@@ -116,8 +116,8 @@ mapping is consistent with observed full-swing/putt frames but `ShotType` is
 informational only (no downstream consumer).
 
 The spin-axis sign flip is the only field with a negative scale factor — it
-exists because the vendor encodes positive-clockwise while OSG/GSPro expect the
-opposite convention.
+exists because the vendor encodes positive-clockwise while the downstream
+ball-data convention used here expects the opposite.
 
 **Invalid-reading sentinel.** Any field the device could not measure this shot is
 sent as `0x8000` (`−32768`). `SquareProtocol` maps that to "no reading" (value 0 +
@@ -166,17 +166,17 @@ Driver (`0204`); `SquareCommandBuilder.DriverClubCode` and
 
 > **`0b06` is the Approach/Gap wedge (GW), not a lob wedge.** The Square hardware
 > exposes no distinct lob-wedge code. This code was previously mislabeled "LW"
-> in OSG and was corrected to "GW" to match the reference project.
+> and was corrected to "GW" to match the reference project.
 
 **Alignment stick** — code `0008` (`SquareClubCatalog.ALIGNMENT_STICK_CODE`). The
 device treats this as a special "club" used to enter alignment mode rather than a
 normal shot club, so it is kept out of the selectable `CLUBS` table. The alignment
-flow that consumes it is not yet implemented in OSG (planned).
+flow that consumes it is not yet implemented (planned).
 
 ### A.6 Downstream mapping
 
-`SquareShotDataMapper.ToOsgBallData` (`SquareShotDataMapper.cs`) converts a
-parsed `SquareShotMetrics` into the OSG/GSPro ball-data dictionary:
+`SquareShotDataMapper.ToBallData` (`SquareShotDataMapper.cs`) converts a
+parsed `SquareShotMetrics` into the ball-data dictionary:
 
 - Speed: m/s → mph (× 2.23694).
 - VLA / HLA / SpinAxis pass through.
@@ -238,7 +238,7 @@ notification payloads, and command payloads as the vendor app sends them.
    the 2-byte little-endian slices of the shot frame until one of them, when
    divided by 100, matches the expected m/s. Do the same for spin and angles.
    The `÷ -100` on spin axis is the moment you realise the vendor uses the
-   opposite sign convention from GSPro/OSG.
+   opposite sign convention from the downstream ball-data format.
 7. **Gate with a plausibility filter.** While the byte map is still
    incomplete, frames that "almost parse" can leak garbage values into
    gameplay. `IsPlausible` is the temporary fence that lets you keep moving
@@ -271,6 +271,6 @@ Same steps will work for any vendor BLE launch monitor:
 5. Trigger known shot events; bisect-decode notification payloads to find
    field offsets and scale factors.
 6. Gate the parser with a plausibility filter until the byte map is complete.
-7. Add a new folder under `addons/launch_monitors/<monitor>/` and depend on
+7. Add a new `<monitor>/` folder under the addon root and depend on
    `LaunchMonitors.Common.Bluetooth.IBluetoothGattClient` for the transport
    (see `../README.md` for the addon contract).

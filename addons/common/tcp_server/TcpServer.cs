@@ -6,6 +6,7 @@ using TcpServerPeer = Godot.TcpServer;
 
 namespace LaunchMonitors.Common.Tcp;
 
+[GlobalClass]
 public partial class TcpServer : Node
 {
     private const int MaxTcpBuffer = 65536;
@@ -14,7 +15,7 @@ public partial class TcpServer : Node
     private readonly TcpServerPeer _tcpServer = new();
     private StreamPeerTcp? _tcpConnection;
     private bool _tcpConnected;
-    private string _tcpString = string.Empty;
+    private string _rxBuffer = string.Empty;
     private string _connectedHost = string.Empty;
     private Dictionary _shotData = new();
     private readonly Dictionary _resp200 = new() { { "Code", 200 } };
@@ -55,6 +56,7 @@ public partial class TcpServer : Node
                 _connectedHost = _tcpConnection.GetConnectedHost() ?? string.Empty;
                 GD.Print($"We have a tcp connection at {_connectedHost}");
                 _tcpConnected = true;
+                _rxBuffer = string.Empty;
                 var hostLabel = string.IsNullOrEmpty(_connectedHost) ? "unknown" : _connectedHost;
                 EmitStatus($"Connected: {hostLabel}");
             }
@@ -75,6 +77,7 @@ public partial class TcpServer : Node
         {
             _tcpConnected = false;
             _connectedHost = string.Empty;
+            _rxBuffer = string.Empty;
             GD.Print("tcp disconnected");
             EmitListeningStatus();
             return;
@@ -91,31 +94,44 @@ public partial class TcpServer : Node
             return;
         }
 
-        if (bytesAvailable > MaxTcpBuffer)
+        // TCP is a byte stream: a single network JSON shot payload may arrive
+        // split across several reads, and several payloads may arrive coalesced
+        // in one read. Accumulate into a buffer and extract whole JSON objects by
+        // brace-matching rather than parsing each read as one complete document.
+        _rxBuffer += _tcpConnection.GetUtf8String(bytesAvailable);
+
+        if (_rxBuffer.Length > MaxTcpBuffer)
         {
-            GD.PushWarning($"TCP payload too large ({bytesAvailable} bytes), dropping");
-            _ = _tcpConnection.GetUtf8String(bytesAvailable);
-            respond_error(413, "Payload too large");
+            GD.PushWarning($"TCP buffer exceeded {MaxTcpBuffer} bytes without a complete message, dropping");
+            _rxBuffer = string.Empty;
+            RespondError(413, "Payload too large");
             return;
         }
 
-        _tcpString = _tcpConnection.GetUtf8String(bytesAvailable);
-        var json = new Json();
-        if (json.Parse(_tcpString) != Error.Ok)
+        while (TryExtractJsonObject(ref _rxBuffer, out var jsonText))
         {
-            respond_error(501, "Bad JSON data");
+            ProcessMessage(jsonText);
+        }
+    }
+
+    private void ProcessMessage(string jsonText)
+    {
+        var json = new Json();
+        if (json.Parse(jsonText) != Error.Ok)
+        {
+            RespondError(501, "Bad JSON data");
             return;
         }
 
         var data = json.GetData();
         if (data.VariantType != Variant.Type.Dictionary)
         {
-            respond_error(501, "Expected JSON object");
+            RespondError(501, "Expected JSON object");
             return;
         }
 
         _shotData = data.AsGodotDictionary();
-        GD.Print($"Launch monitor payload: {_tcpString}");
+        GD.Print($"Launch monitor payload: {jsonText}");
 
         if (_shotData.TryGetValue("ShotDataOptions", out var shotDataOptionsVar)
             && shotDataOptionsVar.VariantType == Variant.Type.Dictionary)
@@ -127,44 +143,125 @@ public partial class TcpServer : Node
                 && _shotData.TryGetValue("BallData", out var ballDataVar)
                 && ballDataVar.VariantType == Variant.Type.Dictionary)
             {
+                // No ack here: the HitBall consumer decides. A scene that
+                // validates shot data calls RespondShotAccepted/RespondShotRejected
+                // after validating; the launch-monitor manager acks on forward.
                 EmitSignal(SignalName.HitBall, ballDataVar.AsGodotDictionary());
                 return;
             }
         }
 
-        respond_error(501, "Missing or invalid shot data");
+        RespondError(501, "Missing or invalid shot data");
     }
 
-    public void respond_error(int code, string message)
+    // Extracts the first complete top-level {...} object from the buffer,
+    // tracking string literals + escapes so braces inside JSON strings are not
+    // miscounted. Returns the object and advances the buffer past it; leaves a
+    // partial trailing object buffered for the next read. Drops leading junk so
+    // a stream that never opens an object cannot grow unbounded.
+    private static bool TryExtractJsonObject(ref string buffer, out string json)
     {
-        if (_tcpConnection == null)
+        json = string.Empty;
+        var depth = 0;
+        var inString = false;
+        var escape = false;
+        var start = -1;
+
+        for (var i = 0; i < buffer.Length; i++)
+        {
+            var c = buffer[i];
+            if (escape)
+            {
+                escape = false;
+                continue;
+            }
+
+            if (inString)
+            {
+                if (c == '\\')
+                {
+                    escape = true;
+                }
+                else if (c == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            switch (c)
+            {
+                case '"':
+                    inString = true;
+                    break;
+                case '{':
+                    if (depth == 0)
+                    {
+                        start = i;
+                    }
+
+                    depth++;
+                    break;
+                case '}':
+                    if (depth > 0)
+                    {
+                        depth--;
+                        if (depth == 0 && start >= 0)
+                        {
+                            json = buffer.Substring(start, i - start + 1);
+                            buffer = buffer[(i + 1)..];
+                            return true;
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        if (start == -1)
+        {
+            // No object start anywhere in the buffer: it is whitespace/junk only.
+            buffer = string.Empty;
+        }
+
+        return false;
+    }
+
+    // Ack methods for the HitBall consumer: the sender's 200/501 reflects shot
+    // validation by whoever consumes the payload, not parse validity.
+    public void RespondShotAccepted()
+    {
+        if (!EnsureConnectedForWrite())
         {
             return;
         }
 
-        _tcpConnection.Poll();
-        var status = _tcpConnection.GetStatus();
-        if (status == StreamPeerTcp.Status.None)
-        {
-            _tcpConnected = false;
-            return;
-        }
+        _tcpConnection!.PutData(Encoding.UTF8.GetBytes(Json.Stringify(_resp200)));
+    }
 
-        if (status != StreamPeerTcp.Status.Connected)
+    public void RespondShotRejected()
+    {
+        RespondError(501, "Invalid ball data");
+    }
+
+    public void RespondError(int code, string message)
+    {
+        if (!EnsureConnectedForWrite())
         {
             return;
         }
 
         _resp50x["Code"] = code;
         _resp50x["Message"] = message;
-        _tcpConnection.PutData(Encoding.ASCII.GetBytes(Json.Stringify(_resp50x)));
+        _tcpConnection!.PutData(Encoding.UTF8.GetBytes(Json.Stringify(_resp50x)));
     }
 
-    public void _on_golf_ball_good_data()
+    private bool EnsureConnectedForWrite()
     {
         if (_tcpConnection == null)
         {
-            return;
+            return false;
         }
 
         _tcpConnection.Poll();
@@ -172,18 +269,10 @@ public partial class TcpServer : Node
         if (status == StreamPeerTcp.Status.None)
         {
             _tcpConnected = false;
-            return;
+            return false;
         }
 
-        if (status == StreamPeerTcp.Status.Connected)
-        {
-            _tcpConnection.PutData(Encoding.ASCII.GetBytes(Json.Stringify(_resp200)));
-        }
-    }
-
-    public void _on_player_bad_data()
-    {
-        respond_error(501, "Invalid ball data");
+        return status == StreamPeerTcp.Status.Connected;
     }
 
     public void StopListening()
@@ -195,16 +284,6 @@ public partial class TcpServer : Node
     public bool GetIsListening()
     {
         return IsListening;
-    }
-
-    public bool GetIsConnected()
-    {
-        return HasConnection;
-    }
-
-    public string GetConnectedHost()
-    {
-        return ConnectedHost;
     }
 
     private void ListenOnPort(int port)
@@ -234,7 +313,7 @@ public partial class TcpServer : Node
         _tcpConnected = false;
         _connectedHost = string.Empty;
         _shotData.Clear();
-        _tcpString = string.Empty;
+        _rxBuffer = string.Empty;
 
         if (_tcpServer.IsListening())
         {

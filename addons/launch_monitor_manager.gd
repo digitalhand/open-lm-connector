@@ -1,7 +1,15 @@
 class_name LaunchMonitorManagerAutoload
 extends Node
 
-# Monitor implementations live in sibling folders (e.g. `square/`); shared transports and external receivers live under `common/`.
+# Reusable launch-monitor orchestrator autoload. Owns the active monitor
+# instance, persists its own settings (so it works drop-in in any Godot
+# project), and re-emits monitor signals so host gameplay code doesn't need to
+# know which monitor is connected.
+#
+# Monitor implementations live in sibling folders (e.g. `square/`); shared
+# transports and external receivers live under `common/`. Script paths are
+# resolved relative to this script's own directory, so the addon works wherever
+# it is installed — it does not assume a fixed `res://addons/...` location.
 
 signal hit_ball(data: Dictionary)
 signal device_discovered(device_id: String, name: String, rssi: int)
@@ -10,15 +18,29 @@ signal error_occurred(message: String)
 signal battery_changed(level: int)
 signal firmware_changed(firmware: String)
 signal ready_changed(is_ready: bool)
+# Emitted whenever a persisted setting changes (enabled, provider, tcp_port,
+# square_club_code, square_handedness, square_device_id). Host UIs can observe
+# this to stay in sync; they may also drive the addon through the setters.
+signal setting_changed(key: String, value: Variant)
 
-const SETTINGS_PATH := "user://square_launch_monitor.cfg"
+# Provider identifiers are owned by the addon (no host dependency). Values match
+# the historical strings so existing hosts keep working.
+const PROVIDER_PITRAC := "PiTrac"
+const PROVIDER_SQUARE := "Square"
+const PROVIDERS := [PROVIDER_PITRAC, PROVIDER_SQUARE]
+
 const DEFAULT_CLUB_CODE := SquareClubCatalog.DEFAULT_CLUB_CODE
-const PROVIDER_PITRAC := AppSettings.LAUNCH_MONITOR_PROVIDER_PITRAC
-const PROVIDER_SQUARE := AppSettings.LAUNCH_MONITOR_PROVIDER_SQUARE
+const DEFAULT_TCP_PORT := 49152
+
+const SETTINGS_PATH := "user://launch_monitor.cfg"
+const SETTINGS_SECTION := "launch_monitor"
+
+# Script locations relative to this addon's root (see `_addon_dir`).
+const SQUARE_SCRIPT_REL := "square/SquareLaunchMonitor.cs"
 const SQUARE_CLASS_NAME := "SquareLaunchMonitor"
-const SQUARE_SCRIPT_PATH := "res://addons/launch_monitors/square/SquareLaunchMonitor.cs"
+const TCP_SERVER_SCRIPT_REL := "common/tcp_server/TcpServer.cs"
 const TCP_SERVER_CLASS_NAME := "TcpServer"
-const TCP_SERVER_SCRIPT_PATH := "res://addons/launch_monitors/common/tcp_server/TcpServer.cs"
+
 const LMONITOR_LOG_PREFIX := "[LMonitor]"
 const SQUARE_DEVICE_PREFIX := "squaregolf"
 const BLUEZ_DEVICE_SEGMENT_PREFIX := "/dev_"
@@ -28,13 +50,29 @@ const TRANSIENT_CONNECT_ERROR_MARKERS := [
 	"could not open the selected bluetooth device"
 ]
 
+# Control-flow state, kept separate from the human-readable `status` display
+# string. Logic branches on `_state`; UI reads `status`. Changing display
+# wording can no longer silently break control flow.
+enum State { DISABLED, DISCONNECTED, SCANNING, CONNECTED, READY, PITRAC }
+
 var devices: Dictionary = {}
 var status := "Disconnected"
 var battery_level := -1
 var firmware := ""
 var is_ready := false
+
+# Persisted settings (addon-owned).
+var _enabled := false
+var _provider := PROVIDER_PITRAC
+var _tcp_port := DEFAULT_TCP_PORT
+var _square_device_id := ""
+var _square_club_code := DEFAULT_CLUB_CODE
+var _square_handedness := 0
+
+var _state := State.DISCONNECTED
 var _square_init_error := ""
-var _square_runtime_enabled := false
+var _tcp_init_error := ""
+var _last_create_error := ""
 
 var _square: Node = null
 var _config := ConfigFile.new()
@@ -42,9 +80,17 @@ var _linux_auto_connect_active := false
 var _linux_auto_connect_target_address := ""
 var _linux_auto_connect_timer: Timer = null
 var _tcp_server: Node = null
-var _tcp_init_error := ""
-var _app_settings: AppSettings = null
 var _active_provider := ""
+
+
+static func is_valid_provider(provider: String) -> bool:
+	return provider in PROVIDERS
+
+
+static func normalize_provider(provider: String) -> String:
+	if is_valid_provider(provider):
+		return provider
+	return PROVIDER_PITRAC
 
 
 func _ready() -> void:
@@ -53,19 +99,100 @@ func _ready() -> void:
 		str(ClassDB.class_exists("CSharpScript")),
 		str(ProjectSettings.get_setting("dotnet/project/assembly_name", ""))
 	])
-	_load_runtime_enabled()
+	_load_settings()
 	_create_square_monitor()
 	if _square == null:
 		_debug_error("Square monitor unavailable during startup: %s" % _square_init_error)
-	_app_settings = _get_app_settings()
-	_connect_launch_monitor_settings()
-	_apply_launch_monitor_settings()
+	_apply()
 
 
 func _exit_tree() -> void:
-	_disconnect_launch_monitor_settings()
 	_stop_pitrac()
 
+
+# --- Public settings API -----------------------------------------------------
+
+func set_enabled(value: bool) -> void:
+	if _enabled == value:
+		return
+	if not value:
+		_cancel_linux_auto_connect_scan()
+	_enabled = value
+	_persist()
+	emit_signal("setting_changed", "enabled", value)
+	_apply()
+
+
+func is_enabled() -> bool:
+	return _enabled
+
+
+func set_provider(value: String) -> void:
+	var normalized := normalize_provider(value)
+	if _provider == normalized:
+		return
+	_provider = normalized
+	_persist()
+	emit_signal("setting_changed", "provider", normalized)
+	_apply()
+
+
+func get_provider() -> String:
+	return _provider
+
+
+func set_tcp_port(value: int) -> void:
+	var clamped := clampi(value, 1, 65535)
+	if _tcp_port == clamped:
+		return
+	_tcp_port = clamped
+	_persist()
+	emit_signal("setting_changed", "tcp_port", clamped)
+	if _enabled and _provider == PROVIDER_PITRAC:
+		_start_pitrac(_tcp_port)
+
+
+func get_tcp_port() -> int:
+	return _tcp_port
+
+
+func set_club_code(club_code: String) -> void:
+	_square_club_code = club_code
+	_persist()
+	emit_signal("setting_changed", "square_club_code", club_code)
+	if _square != null:
+		_square.call("SetClub", club_code)
+
+
+func get_square_club_code() -> String:
+	return _square_club_code
+
+
+func set_handedness(handedness: int) -> void:
+	_square_handedness = handedness
+	_persist()
+	emit_signal("setting_changed", "square_handedness", handedness)
+	if _square != null:
+		_square.call("SetHandedness", handedness)
+
+
+func get_square_handedness() -> int:
+	return _square_handedness
+
+
+func set_selected_device_id(device_id: String) -> void:
+	if _square_device_id == device_id:
+		return
+	_square_device_id = device_id
+	_persist()
+	emit_signal("setting_changed", "square_device_id", device_id)
+
+
+func get_selected_device_id() -> String:
+	return _square_device_id
+
+
+# --- Scan / connect API ------------------------------------------------------
 
 func start_scan() -> void:
 	if not _is_provider_active(PROVIDER_SQUARE):
@@ -92,10 +219,9 @@ func connect_to_device(device_id: String) -> void:
 		emit_signal("error_occurred", message)
 		return
 	_debug_log("connect_to_device requested for %s" % device_id)
-	if _app_settings != null:
-		_app_settings.square_device_id.set_value(device_id)
-	_square.call("SetHandedness", get_square_handedness())
-	_square.call("SetClub", get_square_club_code())
+	set_selected_device_id(device_id)
+	_square.call("SetHandedness", _square_handedness)
+	_square.call("SetClub", _square_club_code)
 	_square.call("ConnectToDevice", device_id)
 
 
@@ -105,6 +231,12 @@ func disconnect_device() -> void:
 		_debug_log("disconnect_device requested")
 		_square.call("DisconnectFromDevice")
 	_clear_monitor_details()
+
+
+func set_ready() -> void:
+	if _square != null:
+		_debug_log("set_ready requested")
+		_square.call("SetReady")
 
 
 func _start_square_scan() -> void:
@@ -125,81 +257,145 @@ func _stop_square_scan() -> void:
 		_square.call("StopScan")
 
 
-func set_enabled(value: bool) -> void:
-	if _square_runtime_enabled == value:
+# --- Settings persistence ----------------------------------------------------
+
+func _load_settings() -> void:
+	if _config.load(SETTINGS_PATH) != OK:
 		return
-	if not value:
-		_cancel_linux_auto_connect_scan()
-	_square_runtime_enabled = value
-	_save_runtime_enabled()
+	_enabled = bool(_config.get_value(SETTINGS_SECTION, "enabled", _enabled))
+	_provider = normalize_provider(str(_config.get_value(SETTINGS_SECTION, "provider", _provider)))
+	_tcp_port = clampi(int(_config.get_value(SETTINGS_SECTION, "tcp_port", _tcp_port)), 1, 65535)
+	_square_device_id = str(_config.get_value(SETTINGS_SECTION, "square_device_id", _square_device_id))
+	_square_club_code = str(_config.get_value(SETTINGS_SECTION, "square_club_code", _square_club_code))
+	_square_handedness = int(_config.get_value(SETTINGS_SECTION, "square_handedness", _square_handedness))
 
 
-func set_club_code(club_code: String) -> void:
-	if _app_settings != null:
-		_app_settings.square_club_code.set_value(club_code)
-	if _square != null:
-		_square.call("SetClub", club_code)
+func _persist() -> void:
+	_config.set_value(SETTINGS_SECTION, "enabled", _enabled)
+	_config.set_value(SETTINGS_SECTION, "provider", _provider)
+	_config.set_value(SETTINGS_SECTION, "tcp_port", _tcp_port)
+	_config.set_value(SETTINGS_SECTION, "square_device_id", _square_device_id)
+	_config.set_value(SETTINGS_SECTION, "square_club_code", _square_club_code)
+	_config.set_value(SETTINGS_SECTION, "square_handedness", _square_handedness)
+	var err := _config.save(SETTINGS_PATH)
+	if err != OK:
+		_debug_error("Failed to save launch monitor settings at %s" % SETTINGS_PATH)
+		emit_signal("error_occurred", "Launch monitor settings could not be saved.")
 
 
-func set_handedness(handedness: int) -> void:
-	if _app_settings != null:
-		_app_settings.square_handedness.set_value(handedness)
-	if _square != null:
-		_square.call("SetHandedness", handedness)
+# --- Provider orchestration --------------------------------------------------
+
+func _apply() -> void:
+	if not _enabled:
+		_disable_launch_monitors()
+		return
+	if _provider == PROVIDER_SQUARE:
+		_start_square_provider()
+	else:
+		_start_pitrac_provider()
 
 
-func get_square_club_code() -> String:
-	if _app_settings == null:
-		return DEFAULT_CLUB_CODE
-	return str(_app_settings.square_club_code.value)
+func _is_provider_active(provider: String) -> bool:
+	return _enabled and _provider == provider
 
 
-func get_square_handedness() -> int:
-	if _app_settings == null:
-		return 0
-	return int(_app_settings.square_handedness.value)
+func _disable_launch_monitors() -> void:
+	_stop_pitrac()
+	_stop_square_provider()
+	_active_provider = ""
+	_clear_monitor_details()
+	_set_status("Disabled", State.DISABLED)
 
 
-func get_selected_device_id() -> String:
-	if _app_settings == null:
-		return ""
-	return str(_app_settings.square_device_id.value)
+func _start_square_provider() -> void:
+	if _active_provider != PROVIDER_SQUARE:
+		_stop_pitrac()
+		_active_provider = PROVIDER_SQUARE
+		if _state == State.DISABLED or _state == State.PITRAC:
+			_set_status("Disconnected", State.DISCONNECTED)
+		_connect_saved_device_on_startup(_square_device_id)
 
 
-func set_ready() -> void:
-	if _square != null:
-		_debug_log("set_ready requested")
-		_square.call("SetReady")
+func _stop_square_provider() -> void:
+	var should_stop_runtime := _active_provider == PROVIDER_SQUARE or _linux_auto_connect_active
+	_cancel_linux_auto_connect_scan()
+	if not should_stop_runtime:
+		_clear_monitor_details()
+		return
+	_stop_square_scan()
+	disconnect_device()
+
+
+func _start_pitrac_provider() -> void:
+	if _active_provider != PROVIDER_PITRAC:
+		_stop_square_provider()
+		_active_provider = PROVIDER_PITRAC
+	_clear_monitor_details()
+	_start_pitrac(_tcp_port)
+
+
+func _start_pitrac(port: int) -> void:
+	if _tcp_server == null:
+		_create_pitrac_tcp_server()
+	if _tcp_server == null:
+		_set_status(_tcp_init_error)
+		return
+
+	if bool(_tcp_server.call("GetIsListening")):
+		_tcp_server.call("StopListening")
+		await get_tree().process_frame
+
+	_tcp_server.call("StartListening", port)
+
+
+func _stop_pitrac() -> void:
+	if _tcp_server == null:
+		return
+	_tcp_server.call("StopListening")
+
+
+# --- Monitor node creation ---------------------------------------------------
+
+# Resolves the addon's root directory from this script's own path, so loads work
+# regardless of where the addon is installed in the host project.
+func _addon_dir() -> String:
+	var script := get_script() as Script
+	if script == null:
+		return "res://addons"
+	return script.resource_path.get_base_dir()
+
+
+# Shared load -> can_instantiate -> new -> add_child path. Returns the node or
+# null; on failure `_last_create_error` describes why.
+func _create_addon_node(rel_path: String, class_label: String) -> Node:
+	_last_create_error = ""
+	var script_path := _addon_dir().path_join(rel_path)
+	_debug_log("Attempting to load script %s" % script_path)
+	var script := load(script_path) as Script
+	if script == null:
+		_last_create_error = "%s script could not be loaded at %s." % [class_label, script_path]
+		return null
+	if not script.can_instantiate():
+		_last_create_error = "%s script is loaded but cannot instantiate. Ensure C# build succeeds and class name matches filename." % class_label
+		return null
+	var node := script.new() as Node
+	if node == null:
+		_last_create_error = "%s could not be created from %s. Check C# build output for load errors." % [class_label, script_path]
+		return null
+	add_child(node)
+	return node
 
 
 func _create_square_monitor() -> void:
-	_square_init_error = ""
-	_debug_log("Attempting to load script %s" % SQUARE_SCRIPT_PATH)
-	var square_script := load(SQUARE_SCRIPT_PATH) as Script
-	if square_script == null:
-		_square_init_error = "Square script could not be loaded at %s." % SQUARE_SCRIPT_PATH
-		_set_status(_square_init_error)
-		emit_signal("error_occurred", _square_init_error)
-		_debug_error(_square_init_error)
-		return
-
-	if not square_script.can_instantiate():
-		_square_init_error = "%s script is loaded but cannot instantiate. Ensure C# build succeeds and class name matches filename." % SQUARE_CLASS_NAME
-		_set_status(_square_init_error)
-		emit_signal("error_occurred", _square_init_error)
-		_debug_error(_square_init_error)
-		return
-
-	_square = square_script.new() as Node
+	_square = _create_addon_node(SQUARE_SCRIPT_REL, SQUARE_CLASS_NAME)
+	_square_init_error = _last_create_error
 	if _square == null:
-		_square_init_error = "%s could not be created from %s. Check C# build output for load errors." % [SQUARE_CLASS_NAME, SQUARE_SCRIPT_PATH]
 		_set_status(_square_init_error)
 		emit_signal("error_occurred", _square_init_error)
 		_debug_error(_square_init_error)
 		return
 
-	add_child(_square)
-	_set_status("Disconnected")
+	_set_status("Disconnected", State.DISCONNECTED)
 	_debug_log("%s instantiated and signals connected." % SQUARE_CLASS_NAME)
 	_square.connect("DeviceDiscovered", _on_square_device_discovered)
 	_square.connect("StatusChanged", _on_square_status_changed)
@@ -210,19 +406,17 @@ func _create_square_monitor() -> void:
 	_square.connect("ShotReceived", _on_square_shot_received)
 
 
-func _load_runtime_enabled() -> void:
-	if _config.load(SETTINGS_PATH) != OK:
+func _create_pitrac_tcp_server() -> void:
+	_tcp_server = _create_addon_node(TCP_SERVER_SCRIPT_REL, TCP_SERVER_CLASS_NAME)
+	_tcp_init_error = _last_create_error
+	if _tcp_server == null:
+		_debug_error(_tcp_init_error)
 		return
-	_square_runtime_enabled = bool(_config.get_value("square", "enabled", false))
+	_tcp_server.connect("HitBall", _on_pitrac_hit_ball)
+	_tcp_server.connect("StatusChanged", _on_pitrac_status_changed)
 
 
-func _save_runtime_enabled() -> void:
-	_config.set_value("square", "enabled", _square_runtime_enabled)
-	var err := _config.save(SETTINGS_PATH)
-	if err != OK:
-		_debug_error("Failed to save Square runtime flag at %s" % SETTINGS_PATH)
-		emit_signal("error_occurred", "Square settings could not be saved.")
-
+# --- Square monitor signal handlers ------------------------------------------
 
 func _on_square_device_discovered(device_id: String, name: String, rssi: int) -> void:
 	if not _is_provider_active(PROVIDER_SQUARE):
@@ -244,7 +438,7 @@ func _on_square_device_discovered(device_id: String, name: String, rssi: int) ->
 func _on_square_status_changed(value: String) -> void:
 	if not _is_provider_active(PROVIDER_SQUARE):
 		return
-	_set_status(_normalize_square_status(value))
+	_set_status(_normalize_square_status(value), _square_state_for(value))
 
 
 func _on_square_error_occurred(message: String) -> void:
@@ -288,160 +482,24 @@ func _on_square_shot_received(data: Dictionary) -> void:
 	emit_signal("hit_ball", data)
 
 
-func _get_app_settings() -> AppSettings:
-	if GlobalSettings == null:
-		return null
-	return GlobalSettings.app_settings
-
-
-func _connect_launch_monitor_settings() -> void:
-	if _app_settings == null:
-		return
-
-	var callback := Callable(self, "_on_launch_monitor_setting_changed")
-	if not _app_settings.launch_monitor_enabled.setting_changed.is_connected(callback):
-		_app_settings.launch_monitor_enabled.setting_changed.connect(callback)
-	if not _app_settings.launch_monitor_provider.setting_changed.is_connected(callback):
-		_app_settings.launch_monitor_provider.setting_changed.connect(callback)
-	if not _app_settings.tcp_port.setting_changed.is_connected(callback):
-		_app_settings.tcp_port.setting_changed.connect(callback)
-
-
-func _disconnect_launch_monitor_settings() -> void:
-	if _app_settings == null:
-		return
-
-	var callback := Callable(self, "_on_launch_monitor_setting_changed")
-	if _app_settings.launch_monitor_enabled.setting_changed.is_connected(callback):
-		_app_settings.launch_monitor_enabled.setting_changed.disconnect(callback)
-	if _app_settings.launch_monitor_provider.setting_changed.is_connected(callback):
-		_app_settings.launch_monitor_provider.setting_changed.disconnect(callback)
-	if _app_settings.tcp_port.setting_changed.is_connected(callback):
-		_app_settings.tcp_port.setting_changed.disconnect(callback)
-
-
-func _on_launch_monitor_setting_changed(_value: Variant) -> void:
-	_apply_launch_monitor_settings()
-
-
-func _apply_launch_monitor_settings() -> void:
-	if _app_settings == null or not bool(_app_settings.launch_monitor_enabled.value):
-		_disable_launch_monitors()
-		return
-
-	var provider := _get_selected_provider()
-	if provider == PROVIDER_SQUARE:
-		_start_square_provider()
-	else:
-		_start_pitrac_provider()
-
-
-func _get_selected_provider() -> String:
-	if _app_settings == null:
-		return PROVIDER_PITRAC
-
-	return AppSettings.normalize_provider(str(_app_settings.launch_monitor_provider.value))
-
-
-func _is_provider_active(provider: String) -> bool:
-	return _app_settings != null and bool(_app_settings.launch_monitor_enabled.value) and _get_selected_provider() == provider
-
-
-func _disable_launch_monitors() -> void:
-	_stop_pitrac()
-	_stop_square_provider()
-	_active_provider = ""
-	_clear_monitor_details()
-	_set_status("Disabled")
-
-
-func _start_square_provider() -> void:
-	if _active_provider != PROVIDER_SQUARE:
-		_stop_pitrac()
-		_active_provider = PROVIDER_SQUARE
-		set_enabled(true)
-		if status == "Disabled" or status.begins_with(PROVIDER_PITRAC):
-			_set_status("Disconnected")
-		_connect_saved_device_on_startup(get_selected_device_id())
-	else:
-		set_enabled(true)
-
-
-func _stop_square_provider() -> void:
-	var should_stop_runtime := _active_provider == PROVIDER_SQUARE or _linux_auto_connect_active
-	_cancel_linux_auto_connect_scan()
-	set_enabled(false)
-	if not should_stop_runtime:
-		_clear_monitor_details()
-		return
-
-	_stop_square_scan()
-	disconnect_device()
-
-
-func _start_pitrac_provider() -> void:
-	if _active_provider != PROVIDER_PITRAC:
-		_stop_square_provider()
-		_active_provider = PROVIDER_PITRAC
-	_clear_monitor_details()
-	_start_pitrac(int(_app_settings.tcp_port.value))
-
-
-func _start_pitrac(port: int) -> void:
-	if _tcp_server == null:
-		_create_pitrac_tcp_server()
-	if _tcp_server == null:
-		_set_status(_tcp_init_error)
-		return
-
-	if bool(_tcp_server.call("GetIsListening")):
-		_tcp_server.call("StopListening")
-		await get_tree().process_frame
-
-	_tcp_server.call("StartListening", port)
-
-
-func _stop_pitrac() -> void:
-	if _tcp_server == null:
-		return
-	_tcp_server.call("StopListening")
-
-
-func _create_pitrac_tcp_server() -> void:
-	_tcp_init_error = ""
-	var tcp_script := load(TCP_SERVER_SCRIPT_PATH) as Script
-	if tcp_script == null:
-		_tcp_init_error = "%s script could not be loaded at %s." % [TCP_SERVER_CLASS_NAME, TCP_SERVER_SCRIPT_PATH]
-		_debug_error(_tcp_init_error)
-		return
-
-	if not tcp_script.can_instantiate():
-		_tcp_init_error = "%s script is loaded but cannot instantiate. Ensure C# build succeeds and class name matches filename." % TCP_SERVER_CLASS_NAME
-		_debug_error(_tcp_init_error)
-		return
-
-	_tcp_server = tcp_script.new() as Node
-	if _tcp_server == null:
-		_tcp_init_error = "%s could not be created from %s. Check C# build output for load errors." % [TCP_SERVER_CLASS_NAME, TCP_SERVER_SCRIPT_PATH]
-		_debug_error(_tcp_init_error)
-		return
-
-	add_child(_tcp_server)
-	_tcp_server.connect("HitBall", _on_pitrac_hit_ball)
-	_tcp_server.connect("StatusChanged", _on_pitrac_status_changed)
-
+# --- PiTrac (network) signal handlers ----------------------------------------
 
 func _on_pitrac_hit_ball(data: Dictionary) -> void:
 	_debug_log("PiTrac shot received with %d fields" % data.size())
 	emit_signal("hit_ball", data)
+	# Manager mode has no gameplay validation hook, so ack on forward. Scenes
+	# that embed TcpServer directly ack from their own validation instead.
+	if _tcp_server != null:
+		_tcp_server.call("RespondShotAccepted")
 
 
 func _on_pitrac_status_changed(value: String) -> void:
-	if _active_provider != PROVIDER_PITRAC or not _is_provider_active(PROVIDER_PITRAC):
+	if not _is_provider_active(PROVIDER_PITRAC):
 		return
+	_set_status("%s %s" % [PROVIDER_PITRAC, value], State.PITRAC)
 
-	_set_status("%s %s" % [PROVIDER_PITRAC, value])
 
+# --- Shared helpers ----------------------------------------------------------
 
 func _clear_monitor_details() -> void:
 	if battery_level != -1:
@@ -501,8 +559,8 @@ func _on_linux_auto_connect_timeout() -> void:
 	_linux_auto_connect_target_address = ""
 	_clear_linux_auto_connect_timer()
 	_stop_square_scan()
-	if status == "Scanning":
-		_set_status("Disconnected")
+	if _state == State.SCANNING:
+		_set_status("Disconnected", State.DISCONNECTED)
 
 
 func _cancel_linux_auto_connect_scan() -> void:
@@ -565,8 +623,10 @@ func _is_hex_digit_code(value: int) -> bool:
 	return (value >= 48 and value <= 57) or (value >= 65 and value <= 70)
 
 
-func _set_status(value: String) -> void:
+func _set_status(value: String, state: int = -1) -> void:
 	status = value
+	if state >= 0:
+		_state = state
 	emit_signal("status_changed", value)
 	_debug_log("status -> %s" % value)
 
@@ -576,6 +636,20 @@ func _normalize_square_status(value: String) -> String:
 	if normalized == "Ready":
 		return "Connected"
 	return normalized
+
+
+func _square_state_for(value: String) -> int:
+	match value.strip_edges():
+		"Scanning":
+			return State.SCANNING
+		"Connected", "Ready":
+			return State.CONNECTED
+		"Disconnected":
+			return State.DISCONNECTED
+		_:
+			# Connection-progress / error messages: leave control-flow state
+			# untouched, they are display-only.
+			return -1
 
 
 func _debug_log(message: String) -> void:

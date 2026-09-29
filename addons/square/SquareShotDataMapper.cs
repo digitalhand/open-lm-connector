@@ -7,7 +7,7 @@ public static class SquareShotDataMapper
 {
     private const float MetersPerSecondToMph = 2.23694f;
 
-    public static IReadOnlyDictionary<string, object> ToOsgBallData(SquareShotMetrics metrics)
+    public static IReadOnlyDictionary<string, object> ToBallData(SquareShotMetrics metrics)
     {
         // Spin components are already resolved by SquareProtocol (including
         // deriving missing back/side spin from total spin + axis), so only the

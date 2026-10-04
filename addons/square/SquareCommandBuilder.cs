@@ -6,6 +6,7 @@ namespace LaunchMonitors.Square;
 public static class SquareCommandBuilder
 {
     public const string DriverClubCode = "0204";
+    public const string PutterClubCode = "0107";
 
     public static byte[] Heartbeat(byte sequence)
     {
@@ -21,6 +22,12 @@ public static class SquareCommandBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clubCode);
         return FromHex($"1182{sequence:X2}{clubCode}0{handedness}000000");
+    }
+
+    /// <summary>Asks the device for the <c>0x11 0x07</c> club frame of the last shot.</summary>
+    public static byte[] RequestClubMetrics(byte sequence)
+    {
+        return FromHex($"1187{sequence:X2}000000000000");
     }
 
     public static byte[] FromHex(string hex)

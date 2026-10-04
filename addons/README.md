@@ -38,7 +38,7 @@ own location, so the install folder name doesn't matter.
 
 ### `launch_monitor_manager.gd` (autoload)
 
-Registered as the `LaunchMonitorManager` autoload when the plugin is enabled (`plugin.gd` calls `add_autoload_singleton`). Owns the active monitor instance, exposes scan/connect APIs to UI, and re-emits the monitor's signals so host gameplay code doesn't need to know which monitor is connected.
+Registered as the `LaunchMonitorManager` autoload when the plugin is enabled (`plugin.gd` calls `add_autoload_singleton`). Owns the active monitor instance, exposes scan/connect APIs to UI, and re-emits the monitor's signals so host gameplay code doesn't need to know which monitor is connected. Square also emits `club_data(Dictionary)` (GSPro `ClubData` keys, unmeasured keys omitted) shortly after each `hit_ball`; an empty dictionary means the device did not track the club (on a Home: no club sticker). A Home never reports impact location, club speed or smash — see [`square/README.md`](square/README.md#club-data).
 
 The manager owns and persists its own settings (`user://launch_monitor.cfg`): `set_enabled`/`is_enabled`, `set_provider`/`get_provider` (`PiTrac` or `Square`), `set_tcp_port`, `set_club_code`, `set_handedness`, `set_selected_device_id` (+ matching getters). Every change emits `setting_changed(key, value)`. A host with its own settings system forwards values into these setters; a vanilla project needs no extra wiring.
 
@@ -56,7 +56,7 @@ Cross-platform BLE GATT abstraction. `BluetoothGattClientFactory.Create()` picks
 - **Windows** → `WindowsBluetoothGattClient` via WinRT (loaded reflectively; compiled only when `GodotTargetPlatform == windows`). The exclusion lives in the host project's `.csproj`.
 - **Other** → `UnsupportedBluetoothGattClient` (throws on use).
 
-`IBluetoothGattClient` is the seam unit tests mock against.
+`IBluetoothGattClient` is the seam unit tests mock against (`tests/SquareClubSessionTests.cs` drives a real `SquareConnectionSession` through a fake client).
 
 ### `common/tcp_server/`
 

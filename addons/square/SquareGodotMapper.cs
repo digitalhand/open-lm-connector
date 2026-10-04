@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Godot;
 using GodotDictionary = Godot.Collections.Dictionary;
 
@@ -7,7 +8,16 @@ public static class SquareGodotMapper
 {
     public static GodotDictionary ToBallData(SquareShotMetrics metrics)
     {
-        var values = SquareShotDataMapper.ToBallData(metrics);
+        return ToGodotDictionary(SquareShotDataMapper.ToBallData(metrics));
+    }
+
+    public static GodotDictionary ToClubData(SquareClubMetrics metrics)
+    {
+        return ToGodotDictionary(SquareShotDataMapper.ToClubData(metrics));
+    }
+
+    private static GodotDictionary ToGodotDictionary(IReadOnlyDictionary<string, object> values)
+    {
         var data = new GodotDictionary();
 
         foreach (var item in values)

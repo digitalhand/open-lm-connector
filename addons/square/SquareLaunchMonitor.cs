@@ -36,6 +36,10 @@ public partial class SquareLaunchMonitor : Node
     [Signal]
     public delegate void ShotReceivedEventHandler(GodotDictionary shotData);
 
+    /// <summary>Club metrics for the last shot, as GSPro <c>ClubData</c> keys (unmeasured keys omitted).</summary>
+    [Signal]
+    public delegate void ClubDataReceivedEventHandler(GodotDictionary clubData);
+
     public override void _Ready()
     {
         _session.DeviceDiscovered += OnDeviceDiscovered;
@@ -45,6 +49,7 @@ public partial class SquareLaunchMonitor : Node
         _session.FirmwareChanged += EmitFirmware;
         _session.ReadyChanged += EmitReady;
         _session.ShotReceived += OnShotReceived;
+        _session.ClubMetricsReceived += OnClubMetricsReceived;
         LogInfo("Node ready.");
     }
 
@@ -58,6 +63,7 @@ public partial class SquareLaunchMonitor : Node
         _session.FirmwareChanged -= EmitFirmware;
         _session.ReadyChanged -= EmitReady;
         _session.ShotReceived -= OnShotReceived;
+        _session.ClubMetricsReceived -= OnClubMetricsReceived;
         _ = _session.DisposeAsync();
     }
 
@@ -92,6 +98,11 @@ public partial class SquareLaunchMonitor : Node
         _session.SetHandedness(handedness);
     }
 
+    public void SetSpinMode(int spinMode)
+    {
+        _ = RunAsync(() => _session.SetSpinModeAsync(spinMode));
+    }
+
     public void SetReady()
     {
         _ = RunAsync(() => _session.SetReadyAsync());
@@ -105,6 +116,11 @@ public partial class SquareLaunchMonitor : Node
     private void OnShotReceived(SquareShotMetrics metrics)
     {
         EmitShot(SquareGodotMapper.ToBallData(metrics));
+    }
+
+    private void OnClubMetricsReceived(SquareClubMetrics metrics)
+    {
+        CallDeferred("emit_signal", SignalName.ClubDataReceived, SquareGodotMapper.ToClubData(metrics));
     }
 
     private async Task RunAsync(Func<Task> action)

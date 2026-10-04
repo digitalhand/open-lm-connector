@@ -2,9 +2,10 @@
 
   <!--
     Standalone test harness for the addon's pure C# code. This repo has no build
-    of its own; only Godot-free sources are linked in here so SquareProtocol can
-    be exercised without Godot or hardware. Godot-dependent files (the Node
-    entrypoints, transports, SquareGodotMapper) are intentionally not included.
+    of its own; only Godot-free sources are linked in here so SquareProtocol and
+    SquareConnectionSession (against a fake GATT client) can be exercised without
+    Godot or hardware. Godot-dependent files (the Node entrypoints, platform
+    transports, SquareGodotMapper) are intentionally not included.
   -->
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
@@ -24,6 +25,15 @@
     <Compile Include="../addons/square/SquareProtocol.cs" Link="Square/SquareProtocol.cs" />
     <Compile Include="../addons/square/SquareShotMetrics.cs" Link="Square/SquareShotMetrics.cs" />
     <Compile Include="../addons/square/SquareShotDataMapper.cs" Link="Square/SquareShotDataMapper.cs" />
+    <Compile Include="../addons/square/SquareCommandBuilder.cs" Link="Square/SquareCommandBuilder.cs" />
+    <Compile Include="../addons/square/SquareConnectionOptions.cs" Link="Square/SquareConnectionOptions.cs" />
+    <Compile Include="../addons/square/SquareConnectionSession.cs" Link="Square/SquareConnectionSession.cs" />
+    <Compile Include="../addons/common/bluetooth/IBluetoothGattClient.cs" Link="Bluetooth/IBluetoothGattClient.cs" />
+    <Compile Include="../addons/common/bluetooth/BluetoothDevice.cs" Link="Bluetooth/BluetoothDevice.cs" />
+    <Compile Include="../addons/common/bluetooth/BluetoothCharacteristicValue.cs" Link="Bluetooth/BluetoothCharacteristicValue.cs" />
+    <Compile Include="../addons/common/bluetooth/BluetoothConnectionOptions.cs" Link="Bluetooth/BluetoothConnectionOptions.cs" />
+    <Compile Include="../addons/common/bluetooth/BluetoothScanOptions.cs" Link="Bluetooth/BluetoothScanOptions.cs" />
+    <Compile Include="../addons/common/bluetooth/BluetoothWriteMode.cs" Link="Bluetooth/BluetoothWriteMode.cs" />
   </ItemGroup>
 
 </Project>

@@ -28,4 +28,29 @@ public static class SquareShotDataMapper
             { "ShotType", metrics.ShotType }
         };
     }
+
+    /// <summary>
+    /// Maps club metrics onto GSPro <c>ClubData</c> key names (degrees, mm).
+    /// Unmeasured fields are omitted rather than zeroed, so consumers can tell
+    /// "square" from "no reading".
+    /// </summary>
+    public static IReadOnlyDictionary<string, object> ToClubData(SquareClubMetrics metrics)
+    {
+        var data = new Dictionary<string, object>();
+        AddIfMeasured(data, "Path", metrics.PathDeg);
+        AddIfMeasured(data, "FaceToTarget", metrics.FaceDeg);
+        AddIfMeasured(data, "AngleOfAttack", metrics.AttackDeg);
+        AddIfMeasured(data, "Loft", metrics.DynamicLoftDeg);
+        AddIfMeasured(data, "HorizontalFaceImpact", metrics.ImpactHorizontalMm);
+        AddIfMeasured(data, "VerticalFaceImpact", metrics.ImpactVerticalMm);
+        return data;
+    }
+
+    private static void AddIfMeasured(Dictionary<string, object> data, string key, float? value)
+    {
+        if (value.HasValue)
+        {
+            data[key] = value.Value;
+        }
+    }
 }

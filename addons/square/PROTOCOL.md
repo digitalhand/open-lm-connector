@@ -36,7 +36,7 @@ observing the device's BLE traffic alongside the official client.
 ### A.2 Connection handshake
 
 Implemented in `SquareConnectionSession.ConnectToDeviceAsync`
-(`SquareConnectionSession.cs:73-120`). Order matters; the delays are not
+(`SquareConnectionSession.cs:80-127`). Order matters; the delays are not
 cosmetic:
 
 1. Connect via the GATT client.
@@ -49,20 +49,37 @@ cosmetic:
 8. Write `DetectBall(mode=1, spinMode=1)` — the "ready to detect a shot" trigger.
 9. Start a heartbeat timer (default **every 5 s**) — periodic `Heartbeat` writes.
 
-After every parsed shot, the session waits `ConnectionReadyDelay` and re-issues
-`DetectBall` to arm the next shot (`SquareConnectionSession.cs:295-322`).
+A club change after the handshake (`SetClubAsync`) writes `Club` and, when the
+device is armed and no shot is waiting to re-arm, follows it with `DetectBall`,
+as the squaregolf-connector reference does (`ActivateBallDetection`). The club is
+the device's only shot-mode signal: there is no putting command, the putter
+(`0107`) is what makes it read a putt (allsquare `docs/WIRE.md` §5).
+
+After every parsed shot, the session starts waiting for that shot's club frame,
+sends `RequestClubMetrics` (A.3), waits `ConnectionReadyDelay`, stops waiting,
+and re-issues `DetectBall` to arm the next shot (`SquareConnectionSession.cs:303-342`).
 
 ### A.3 Outbound command frames
 
 From `SquareCommandBuilder.cs`. `{seq}` is a wrapping byte that increments per
 command (`SquareConnectionSession.NextSequence`). Frame lengths are fixed per
-command (Heartbeat = 8 bytes, DetectBall and Club = 9 bytes).
+command (Heartbeat = 8 bytes, DetectBall, Club and RequestClubMetrics = 9 bytes).
 
 | Command     | Bytes (hex)                                  | Source                         |
 | ----------- | -------------------------------------------- | ------------------------------ |
-| Heartbeat   | `11 83 {seq} 00 00 00 00 00`                 | `SquareCommandBuilder.cs:10`   |
-| DetectBall  | `11 81 {seq} 0{mode} 1{spinMode} 00 00 00 00`| `SquareCommandBuilder.cs:15`   |
-| Club        | `11 82 {seq} {clubCode_2B} 0{handedness} 00 00 00` | `SquareCommandBuilder.cs:20` |
+| Heartbeat   | `11 83 {seq} 00 00 00 00 00`                 | `SquareCommandBuilder.cs:11`   |
+| DetectBall  | `11 81 {seq} 0{mode} 1{spinMode} 00 00 00 00`| `SquareCommandBuilder.cs:16`   |
+| Club        | `11 82 {seq} {clubCode_2B} 0{handedness} 00 00 00` | `SquareCommandBuilder.cs:21` |
+| RequestClubMetrics | `11 87 {seq} 00 00 00 00 00 00`       | `SquareCommandBuilder.RequestClubMetrics` |
+
+- `RequestClubMetrics` is sent once after every parsed shot frame
+  (`SquareConnectionSession.RequestClubMetricsAsync`); the device answers with
+  the club frame below. Without it the device never sends club data.
+- On Linux the write can fail with `org.bluez.Error.InProgress` **while the
+  device still answers** (seen on a Square Home: the failed write was followed by
+  six copies of a tracked club frame). A failed write is therefore retried (up
+  to 3 attempts, 150 ms apart, skipped once the club frame has arrived) and never
+  cancels the wait for the club frame.
 
 - `mode` and `spinMode` are single hex digits packed into the upper nibble of
   bytes 3 and 4 — the code path that uses them only ever sends `mode=1,
@@ -73,12 +90,12 @@ command (Heartbeat = 8 bytes, DetectBall and Club = 9 bytes).
 
 ### A.4 Inbound frames
 
-From `SquareProtocol.cs`. Both known frame types are ≥17 bytes and start with
-`0x11`. The second byte discriminates.
+From `SquareProtocol.cs`. Every known frame starts with `0x11`; the second byte
+discriminates. Sensor and shot frames are ≥17 bytes, club frames ≥3.
 
 #### Sensor frame — `0x11 0x01 …`
 
-`SquareProtocol.TryParseSensor` (`SquareProtocol.cs:18-34`):
+`SquareProtocol.TryParseSensor` (`SquareProtocol.cs:23-39`):
 
 | Offset | Width  | Field                                |
 | ------ | ------ | ------------------------------------ |
@@ -96,7 +113,7 @@ parsed but currently unused downstream.
 
 #### Shot frame — `0x11 0x02 …`
 
-`SquareProtocol.TryParseShot` (`SquareProtocol.cs:36-62`):
+`SquareProtocol.TryParseShot` (`SquareProtocol.cs:47-106`):
 
 | Offset | Width | Field            | Decode                  |
 | ------ | ----- | ---------------- | ----------------------- |
@@ -109,15 +126,17 @@ parsed but currently unused downstream.
 | 9      | 2     | total spin       | Int16 LE → rpm          |
 | 11     | 2     | spin axis        | Int16 LE ÷ **−100** → degrees (sign flipped) |
 | 13     | 2     | back spin        | Int16 LE → rpm          |
-| 15     | 2     | side spin        | Int16 LE → rpm          |
+| 15     | 2     | side spin        | Int16 LE × **−1** → rpm (sign flipped) |
 
 Byte 2 (shot type) is **opaque metadata** on the Home device; the `0x37`/`0x13`
 mapping is consistent with observed full-swing/putt frames but `ShotType` is
 informational only (no downstream consumer).
 
-The spin-axis sign flip is the only field with a negative scale factor — it
-exists because the vendor encodes positive-clockwise while the downstream
-ball-data convention used here expects the opposite.
+Spin axis and side spin are both sign-flipped: the vendor encodes them
+positive-left while the downstream (GSPro) ball-data convention is
+positive-right. Only a *measured* side spin is flipped; a derived one (see A.6)
+is computed from the already-flipped axis. The squaregolf-connector reference
+negates both fields in its GSPro and InfiniteTees conversions.
 
 **Invalid-reading sentinel.** Any field the device could not measure this shot is
 sent as `0x8000` (`−32768`). `SquareProtocol` maps that to "no reading" (value 0 +
@@ -126,14 +145,75 @@ unmeasured spin leaked through as a huge negative value, and an unmeasured
 speed / total spin / vertical angle would fail the plausibility filter below and
 **drop the entire shot**.
 
-Frames that parse but fail the plausibility filter
-(`SquareProtocol.IsPlausible`, `SquareProtocol.cs:64-71`) are dropped: ball
-speed in (0, 250) m/s, total spin in [0, 30000) rpm, vertical angle ≥ 0. This
-filter is a guard against partially-understood frames; it is not a documented
-vendor constraint.
+Frames that parse but fail the plausibility filter (`SquareProtocol.IsPlausible`)
+are dropped: ball speed in (0, 250) m/s, total spin in [0, 30000) rpm, vertical
+angle inside (−90°, 90°). This filter is a guard against partially-understood
+frames; it is not a documented vendor constraint.
+
+A negative vertical angle is a real reading: a Square Home putt (putter `0107`
+selected) arrived as `11 02 13 8101 E6FF 9101 0000 …` — 3.85 m/s, **−0.26°**,
+4.01° right, no spin. An earlier `≥ 0` bound dropped such putts.
+
+The device stops detecting once it reports a strike (its heartbeat
+acknowledgement state goes from `04` ready to `00`), so a rejected shot frame is
+logged (`Ball packet rejected as implausible: <hex>`) and still re-arms the
+device after `ConnectionReadyDelay`; otherwise every later shot is lost.
+
+Two other frames arrive on the Event characteristic and are ignored: `11 03 …`
+(heartbeat acknowledgement, byte 3 = device state) and `71 …` (clock tick,
+about every 3 s); see allsquare `docs/WIRE.md` §6.3, §6.8, §9.
 
 Duplicate shot frames (identical payload to the previous one) are suppressed in
 `SquareConnectionSession.HandleNotificationAsync`.
+
+#### Club frame — `0x11 0x07 …`
+
+`SquareProtocol.TryParseClub`. Layout from the squaregolf-connector reference and
+the allsquare Omni wire spec (github.com/divotmaker/allsquare, `docs/WIRE.md` §6.6):
+
+| Offset | Width | Field             | Decode                                   |
+| ------ | ----- | ----------------- | ---------------------------------------- |
+| 0      | 1     | `0x11`            | frame marker                             |
+| 1      | 1     | `0x07`            | club discriminator                       |
+| 2      | 1     | validity mask     | bit n = field n measured                 |
+| 3      | 2     | club path         | Int16 LE ÷ 100 → degrees (+ = in-to-out), bit 0 |
+| 5      | 2     | face to target    | Int16 LE ÷ 100 → degrees (+ = open), bit 1 |
+| 7      | 2     | attack angle      | Int16 LE ÷ 100 → degrees (+ = up), bit 2 |
+| 9      | 2     | dynamic loft      | Int16 LE ÷ 100 → degrees, bit 3          |
+| 11     | 2     | impact horizontal | Int16 LE ÷ 100 → mm (− = toe), bit 4     |
+| 13     | 2     | impact vertical   | Int16 LE ÷ 100 → mm (− = low), bit 5     |
+| 15     | 2     | club speed        | Omni only — not parsed                   |
+| 17     | 2     | smash factor      | Omni only — not parsed                   |
+
+- **Unmeasured fields carry `0xFFFF` (−1)**, not the ball frame's `0x8000`; both
+  are treated as "no reading". A non-zero mask must also flag the field. A zero
+  mask falls back to the sentinel alone, so a device that never fills the mask
+  cannot lose readings.
+- **Untracked shot.** When the device does not track the club — no club
+  sticker on the face, or a strike it declined — it answers with mask `00` and
+  every field `0xFFFF`. On a Square Home this was captured as the 11-byte frame
+  `11 07 00 FF FF FF FF FF FF FF FF`; allsquare reports a bare 3-byte `11 07 00`
+  form too. Both parse as "no reading" (`SquareClubMetrics.HasReading == false`),
+  are still emitted (so hosts can show "not tracked"), and the session logs
+  `Club packet: shot not tracked …`.
+- **The Home's frame stops after dynamic loft** (11 bytes): it carries no impact
+  location, club speed or smash. Impact is trusted only when its mask bit is set
+  and the value lies on the face (|h| ≤ 40 mm, |v| ≤ 30 mm), so zero padding never
+  reads as a centre strike.
+- **Impact sign:** allsquare reports horizontal negative toward the toe for a
+  right-hander, checked against the vendor app's impact display. The
+  squaregolf-connector UI labels positive as toe; allsquare's hardware-checked
+  convention is used here.
+- The angles need no sign flips: the reference passes them straight into GSPro
+  `ClubData`.
+- Every notification arrives at least twice, byte-identical. A club frame is
+  accepted only between a shot frame and that shot's re-arm (`DetectBall`), and
+  only once per shot, whatever happened to the `RequestClubMetrics` write. The
+  wait is tracked per shot, so an earlier shot's re-arm (or a reconnect) never
+  ends a newer shot's wait.
+  This drops the duplicates, frames that arrive after re-arm, and any stale club
+  data the device replays after a reconnect. With the putter selected the four angles are dropped, as in the
+  reference's `applyPutterClubFilter`.
 
 ### A.5 Club codes
 
@@ -181,6 +261,12 @@ parsed `SquareShotMetrics` into the ball-data dictionary:
 - Speed: m/s → mph (× 2.23694).
 - VLA / HLA / SpinAxis pass through.
 - TotalSpin is floored at 0.
+
+`SquareShotDataMapper.ToClubData` maps club metrics onto GSPro `ClubData` keys
+(`Path`, `FaceToTarget`, `AngleOfAttack`, `Loft`, `HorizontalFaceImpact`,
+`VerticalFaceImpact`), **omitting** unmeasured fields rather than zeroing them.
+`SquareLaunchMonitor` emits it as `ClubDataReceived`; the manager re-emits it as
+`club_data(Dictionary)`.
 
 Back/side-spin **decomposition** lives in `SquareProtocol.TryParseShot`, not the
 mapper: when total spin and spin axis are valid but a spin component was not

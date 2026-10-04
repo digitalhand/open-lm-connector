@@ -52,8 +52,9 @@ public class SquareProtocolTests
     public void TryParseShot_FullSwing_DecodesEveryField()
     {
         // 50.00 m/s, 15.00 VLA, 2.00 HLA, 3000 total spin, 5.00 spin axis,
-        // 2900 back spin, 261 side spin. Spin axis is encoded with a -100 scale.
-        var frame = BuildShotFrame(0x37, 5000, 1500, 200, 3000, -500, 2900, 261);
+        // 2900 back spin, 261 side spin. The device encodes spin axis and side
+        // spin positive-left; both decode flipped (GSPro: positive = right).
+        var frame = BuildShotFrame(0x37, 5000, 1500, 200, 3000, -500, 2900, -261);
 
         Assert.True(SquareProtocol.TryParseShot(frame, out var metrics));
         Assert.Equal(50.0f, metrics.BallSpeedMps, 3);
@@ -64,6 +65,8 @@ public class SquareProtocolTests
         Assert.Equal(2900, metrics.BackSpinRpm);
         Assert.Equal(261, metrics.SideSpinRpm);
         Assert.Equal("full", metrics.ShotType);
+        Assert.Equal(SquareValueSource.Packet, metrics.Sources.BackSpin);
+        Assert.Equal(SquareValueSource.Packet, metrics.Sources.SideSpin);
     }
 
     [Theory]
@@ -90,17 +93,20 @@ public class SquareProtocolTests
         Assert.True(SquareProtocol.TryParseShot(frame, out var metrics));
         Assert.Equal(2989, metrics.BackSpinRpm);
         Assert.Equal(261, metrics.SideSpinRpm);
+        Assert.Equal(SquareValueSource.Derived, metrics.Sources.BackSpin);
+        Assert.Equal(SquareValueSource.Derived, metrics.Sources.SideSpin);
     }
 
     [Fact]
     public void TryParseShot_VerticalAngleSentinel_BecomesZeroAndStillParses()
     {
         // Documented asymmetry: an unmeasured VLA collapses to 0 and passes the
-        // plausibility gate (>= 0) rather than dropping the shot.
+        // plausibility gate rather than dropping the shot.
         var frame = BuildShotFrame(0x37, 5000, InvalidReadingSentinel, 200, 3000, -500, 2900, 261);
 
         Assert.True(SquareProtocol.TryParseShot(frame, out var metrics));
         Assert.Equal(0.0f, metrics.VerticalAngle, 3);
+        Assert.Equal(SquareValueSource.Missing, metrics.Sources.VerticalAngle);
     }
 
     [Theory]
@@ -114,9 +120,25 @@ public class SquareProtocolTests
     }
 
     [Fact]
-    public void TryParseShot_NegativeVerticalAngle_ReturnsFalse()
+    public void TryParseShot_PuttLaunchedSlightlyDown_Parses()
     {
-        var frame = BuildShotFrame(0x37, 5000, -100, 200, 3000, -500, 2900, 261);
+        // A real Square Home putt: 3.85 m/s, launched 0.26 deg down, 4.01 deg right, no spin.
+        var frame = Convert.FromHexString("1102138101E6FF91010000000000000000");
+
+        Assert.True(SquareProtocol.TryParseShot(frame, out var metrics));
+        Assert.Equal("putt", metrics.ShotType);
+        Assert.Equal(3.85f, metrics.BallSpeedMps, 3);
+        Assert.Equal(-0.26f, metrics.VerticalAngle, 3);
+        Assert.Equal(4.01f, metrics.HorizontalAngle, 3);
+        Assert.Equal(0, metrics.TotalSpinRpm);
+    }
+
+    [Theory]
+    [InlineData((short)-9000)]  // straight down
+    [InlineData((short)9000)]   // straight up
+    public void TryParseShot_VerticalAngleOutsideAQuarterTurn_ReturnsFalse(short verticalAngleRaw)
+    {
+        var frame = BuildShotFrame(0x37, 5000, verticalAngleRaw, 200, 3000, -500, 2900, 261);
 
         Assert.False(SquareProtocol.TryParseShot(frame, out _));
     }

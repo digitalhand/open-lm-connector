@@ -12,6 +12,9 @@ extends Node
 # it is installed — it does not assume a fixed `res://addons/...` location.
 
 signal hit_ball(data: Dictionary)
+# Club metrics for the last shot (GSPro `ClubData` keys; unmeasured keys omitted).
+# Square only, and it arrives shortly after `hit_ball`.
+signal club_data(data: Dictionary)
 signal device_discovered(device_id: String, name: String, rssi: int)
 signal status_changed(status: String)
 signal error_occurred(message: String)
@@ -19,7 +22,7 @@ signal battery_changed(level: int)
 signal firmware_changed(firmware: String)
 signal ready_changed(is_ready: bool)
 # Emitted whenever a persisted setting changes (enabled, provider, tcp_port,
-# square_club_code, square_handedness, square_device_id). Host UIs can observe
+# square_club_code, square_handedness, square_spin_mode, square_device_id). Host UIs can observe
 # this to stay in sync; they may also drive the addon through the setters.
 signal setting_changed(key: String, value: Variant)
 
@@ -31,6 +34,7 @@ const PROVIDERS := [PROVIDER_PITRAC, PROVIDER_SQUARE]
 
 const DEFAULT_CLUB_CODE := SquareClubCatalog.DEFAULT_CLUB_CODE
 const DEFAULT_TCP_PORT := 49152
+const DEFAULT_SPIN_MODE := 1
 
 const SETTINGS_PATH := "user://launch_monitor.cfg"
 const SETTINGS_SECTION := "launch_monitor"
@@ -68,6 +72,7 @@ var _tcp_port := DEFAULT_TCP_PORT
 var _square_device_id := ""
 var _square_club_code := DEFAULT_CLUB_CODE
 var _square_handedness := 0
+var _square_spin_mode := DEFAULT_SPIN_MODE
 
 var _state := State.DISCONNECTED
 var _square_init_error := ""
@@ -180,6 +185,21 @@ func get_square_handedness() -> int:
 	return _square_handedness
 
 
+func set_square_spin_mode(mode: int) -> void:
+	var normalized := 0 if mode == 0 else 1
+	if _square_spin_mode == normalized:
+		return
+	_square_spin_mode = normalized
+	_persist()
+	emit_signal("setting_changed", "square_spin_mode", normalized)
+	if _square != null:
+		_square.call("SetSpinMode", normalized)
+
+
+func get_square_spin_mode() -> int:
+	return _square_spin_mode
+
+
 func set_selected_device_id(device_id: String) -> void:
 	if _square_device_id == device_id:
 		return
@@ -222,6 +242,7 @@ func connect_to_device(device_id: String) -> void:
 	set_selected_device_id(device_id)
 	_square.call("SetHandedness", _square_handedness)
 	_square.call("SetClub", _square_club_code)
+	_square.call("SetSpinMode", _square_spin_mode)
 	_square.call("ConnectToDevice", device_id)
 
 
@@ -268,6 +289,7 @@ func _load_settings() -> void:
 	_square_device_id = str(_config.get_value(SETTINGS_SECTION, "square_device_id", _square_device_id))
 	_square_club_code = str(_config.get_value(SETTINGS_SECTION, "square_club_code", _square_club_code))
 	_square_handedness = int(_config.get_value(SETTINGS_SECTION, "square_handedness", _square_handedness))
+	_square_spin_mode = 0 if int(_config.get_value(SETTINGS_SECTION, "square_spin_mode", DEFAULT_SPIN_MODE)) == 0 else 1
 
 
 func _persist() -> void:
@@ -277,6 +299,7 @@ func _persist() -> void:
 	_config.set_value(SETTINGS_SECTION, "square_device_id", _square_device_id)
 	_config.set_value(SETTINGS_SECTION, "square_club_code", _square_club_code)
 	_config.set_value(SETTINGS_SECTION, "square_handedness", _square_handedness)
+	_config.set_value(SETTINGS_SECTION, "square_spin_mode", _square_spin_mode)
 	var err := _config.save(SETTINGS_PATH)
 	if err != OK:
 		_debug_error("Failed to save launch monitor settings at %s" % SETTINGS_PATH)
@@ -403,6 +426,7 @@ func _create_square_monitor() -> void:
 	_square.connect("BatteryChanged", _on_square_battery_changed)
 	_square.connect("FirmwareChanged", _on_square_firmware_changed)
 	_square.connect("ReadyChanged", _on_square_ready_changed)
+	_square.connect("ClubDataReceived", _on_square_club_data_received)
 	_square.connect("ShotReceived", _on_square_shot_received)
 
 
@@ -480,6 +504,13 @@ func _on_square_shot_received(data: Dictionary) -> void:
 		return
 	_debug_log("shot received with %d fields" % data.size())
 	emit_signal("hit_ball", data)
+
+
+func _on_square_club_data_received(data: Dictionary) -> void:
+	if not _is_provider_active(PROVIDER_SQUARE):
+		return
+	_debug_log("club data received with %d fields" % data.size())
+	emit_signal("club_data", data)
 
 
 # --- PiTrac (network) signal handlers ----------------------------------------

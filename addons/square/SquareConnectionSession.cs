@@ -30,6 +30,7 @@ internal sealed class SquareConnectionSession : IAsyncDisposable
     private int _awaitingClubForShot;
     private string _clubCode = SquareCommandBuilder.DriverClubCode;
     private int _handedness;
+    private bool _swingStick;
     private int _spinMode = 1;
     private int _lastArmedSpinMode = 1;
     private bool _isArmed;
@@ -106,7 +107,7 @@ internal sealed class SquareConnectionSession : IAsyncDisposable
             EmitStatus("Connected");
             await WriteCommandAsync(SquareCommandBuilder.Heartbeat(NextSequence()), cancellationToken);
             await _delayAsync(_options.ConnectionClubDelay, cancellationToken);
-            await WriteCommandAsync(SquareCommandBuilder.Club(NextSequence(), _clubCode, _handedness), cancellationToken);
+            await WriteCommandAsync(ClubCommand(), cancellationToken);
             await _delayAsync(_options.ConnectionReadyDelay, cancellationToken);
             await SetReadyAsync(cancellationToken);
             StartHeartbeat();
@@ -158,6 +159,24 @@ internal sealed class SquareConnectionSession : IAsyncDisposable
         _clubCode = clubCode;
         _logInfo($"SetClub requested. clubCode={_clubCode}");
 
+        await SendClubAsync(cancellationToken);
+    }
+
+    /// <summary>Square's swing stick instead of a real club: the selected club is sent by its swing stick code.</summary>
+    public async Task SetSwingStickAsync(bool swingStick, CancellationToken cancellationToken = default)
+    {
+        if (_swingStick == swingStick)
+        {
+            return;
+        }
+
+        _swingStick = swingStick;
+        _logInfo($"SetSwingStick requested. swingStick={_swingStick}");
+        await SendClubAsync(cancellationToken);
+    }
+
+    private async Task SendClubAsync(CancellationToken cancellationToken)
+    {
         if (!_isConnected)
         {
             return;
@@ -166,7 +185,7 @@ internal sealed class SquareConnectionSession : IAsyncDisposable
         await _armLock.WaitAsync(cancellationToken);
         try
         {
-            await WriteCommandAsync(SquareCommandBuilder.Club(NextSequence(), _clubCode, _handedness), cancellationToken);
+            await WriteCommandAsync(ClubCommand(), cancellationToken);
             // The club is the device's only shot-mode signal, and the reference
             // always follows it with DetectBall. A shot still waiting to re-arm
             // sends its own.
@@ -179,6 +198,14 @@ internal sealed class SquareConnectionSession : IAsyncDisposable
         {
             _armLock.Release();
         }
+    }
+
+    // A club with no swing stick code (the alignment stick) is sent as it is.
+    private byte[] ClubCommand()
+    {
+        return _swingStick && SquareCommandBuilder.TryGetSwingStickCode(_clubCode, out _)
+            ? SquareCommandBuilder.SwingStick(NextSequence(), _clubCode, _handedness)
+            : SquareCommandBuilder.Club(NextSequence(), _clubCode, _handedness);
     }
 
     public void SetHandedness(int handedness)

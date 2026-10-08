@@ -22,8 +22,9 @@ signal battery_changed(level: int)
 signal firmware_changed(firmware: String)
 signal ready_changed(is_ready: bool)
 # Emitted whenever a persisted setting changes (enabled, provider, tcp_port,
-# square_club_code, square_handedness, square_spin_mode, square_device_id). Host UIs can observe
-# this to stay in sync; they may also drive the addon through the setters.
+# square_club_code, square_handedness, square_spin_mode, square_swing_stick,
+# square_device_id). Host UIs can observe this to stay in sync; they may also
+# drive the addon through the setters.
 signal setting_changed(key: String, value: Variant)
 
 # Provider identifiers are owned by the addon (no host dependency). Values match
@@ -73,6 +74,7 @@ var _square_device_id := ""
 var _square_club_code := DEFAULT_CLUB_CODE
 var _square_handedness := 0
 var _square_spin_mode := DEFAULT_SPIN_MODE
+var _square_swing_stick := false
 
 var _state := State.DISCONNECTED
 var _square_init_error := ""
@@ -200,6 +202,22 @@ func get_square_spin_mode() -> int:
 	return _square_spin_mode
 
 
+## Square's swing stick instead of a real club: the selected club goes to the
+## device by its swing stick code. square_club_code stays the regular code.
+func set_square_swing_stick(on: bool) -> void:
+	if _square_swing_stick == on:
+		return
+	_square_swing_stick = on
+	_persist()
+	emit_signal("setting_changed", "square_swing_stick", on)
+	if _square != null:
+		_square.call("SetSwingStick", on)
+
+
+func get_square_swing_stick() -> bool:
+	return _square_swing_stick
+
+
 func set_selected_device_id(device_id: String) -> void:
 	if _square_device_id == device_id:
 		return
@@ -243,6 +261,7 @@ func connect_to_device(device_id: String) -> void:
 	_square.call("SetHandedness", _square_handedness)
 	_square.call("SetClub", _square_club_code)
 	_square.call("SetSpinMode", _square_spin_mode)
+	_square.call("SetSwingStick", _square_swing_stick)
 	_square.call("ConnectToDevice", device_id)
 
 
@@ -290,6 +309,7 @@ func _load_settings() -> void:
 	_square_club_code = str(_config.get_value(SETTINGS_SECTION, "square_club_code", _square_club_code))
 	_square_handedness = int(_config.get_value(SETTINGS_SECTION, "square_handedness", _square_handedness))
 	_square_spin_mode = 0 if int(_config.get_value(SETTINGS_SECTION, "square_spin_mode", DEFAULT_SPIN_MODE)) == 0 else 1
+	_square_swing_stick = bool(_config.get_value(SETTINGS_SECTION, "square_swing_stick", _square_swing_stick))
 
 
 func _persist() -> void:
@@ -300,6 +320,7 @@ func _persist() -> void:
 	_config.set_value(SETTINGS_SECTION, "square_club_code", _square_club_code)
 	_config.set_value(SETTINGS_SECTION, "square_handedness", _square_handedness)
 	_config.set_value(SETTINGS_SECTION, "square_spin_mode", _square_spin_mode)
+	_config.set_value(SETTINGS_SECTION, "square_swing_stick", _square_swing_stick)
 	var err := _config.save(SETTINGS_PATH)
 	if err != OK:
 		_debug_error("Failed to save launch monitor settings at %s" % SETTINGS_PATH)

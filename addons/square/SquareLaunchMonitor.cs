@@ -103,6 +103,11 @@ public partial class SquareLaunchMonitor : Node
         _ = RunAsync(() => _session.SetSpinModeAsync(spinMode));
     }
 
+    public void SetSwingStick(bool swingStick)
+    {
+        _ = RunAsync(() => _session.SetSwingStickAsync(swingStick));
+    }
+
     public void SetReady()
     {
         _ = RunAsync(() => _session.SetReadyAsync());

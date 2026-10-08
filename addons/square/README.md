@@ -76,6 +76,11 @@ table is in [`PROTOCOL.md` §A.5](PROTOCOL.md). Notes:
 
 - `0b06` is the **Approach/Gap wedge (GW)** — the hardware has no distinct lob
   wedge.
+- **Swing stick mode** (`set_square_swing_stick`, off by default) sends the
+  selected club by its swing stick code, for Square's swing stick instead of a
+  real club. `square_club_code` stays the regular code, so hosts keep naming the
+  club the same way. Taken from the reference project and **not yet verified on
+  hardware** — see [`PROTOCOL.md` §A.5](PROTOCOL.md).
 - The **alignment stick** (`0008`, `ALIGNMENT_STICK_CODE`) is a special mode
   trigger, not a selectable shot club; the alignment flow that uses it is not yet
   implemented.

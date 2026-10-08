@@ -248,6 +248,31 @@ Driver (`0204`); `SquareCommandBuilder.DriverClubCode` and
 > exposes no distinct lob-wedge code. This code was previously mislabeled "LW"
 > and was corrected to "GW" to match the reference project.
 
+**Swing stick** — Square's swing stick is not a command of its own: each club has
+a second code, sent in the same `11 82` command when swing stick mode is on
+(`SquareCommandBuilder.SwingStick`, `SetSwingStickAsync`). The codes are the
+reference project's `SwingStickCode` values:
+
+| Club          | Regular | Swing stick |
+| ------------- | ------- | ----------- |
+| Driver        | `0204`  | `0202`      |
+| 3 / 5 / 7 Wood | `0305` / `0505` / `0705` | `0301` / `0501` / `0701` |
+| 4 – 9 Iron    | `0406` … `0906` | `0400` … `0900` |
+| PW / GW / SW  | `0a06` / `0b06` / `0c06` | `0a00` / `0b00` / `0c00` |
+| Putter        | `0107`  | `0103`      |
+
+The frame is one byte shorter than `Club`: `11 82 {seq} {code} 0{hand} 00 00`
+(8 bytes), exactly as the reference's `SwingStickCommand` builds it. Toggling the
+mode re-sends the club and, like a club change, follows it with `DetectBall`. A
+code with no swing stick form (the alignment stick) is sent as a regular club.
+
+> **Not verified on hardware.** The reference defines and unit-tests
+> `SwingStickCommand` but never calls it, so neither the codes nor the shorter
+> frame have been seen working on a device. The reference also lists the 8 Iron's
+> swing stick code as `0900`, the same as the 9 Iron's; we send `0800`, which
+> follows every other iron. If the 8 Iron misbehaves with the swing stick, try
+> `0900`.
+
 **Alignment stick** — code `0008` (`SquareClubCatalog.ALIGNMENT_STICK_CODE`). The
 device treats this as a special "club" used to enter alignment mode rather than a
 normal shot club, so it is kept out of the selectable `CLUBS` table. The alignment

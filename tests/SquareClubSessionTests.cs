@@ -218,6 +218,49 @@ public class SquareClubSessionTests
     }
 
     [Fact]
+    public async Task SwingStickIsUsedOnConnectAndReconnect()
+    {
+        await using var rig = await SessionRig.ConnectAsync(swingStick: true);
+        Assert.Equal("0202000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+
+        await rig.ReconnectAsync();
+        Assert.Equal("0202000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+    }
+
+    [Fact]
+    public async Task SwingStickChangesResendTheClubAndReArm()
+    {
+        await using var rig = await SessionRig.ConnectAsync();
+        Assert.Equal("020400000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+        var clubs = rig.Client.ClubCommands.Count;
+        var detects = rig.Client.DetectBallCommands.Count;
+
+        await rig.Session.SetSwingStickAsync(true);
+        Assert.Equal(clubs + 1, rig.Client.ClubCommands.Count);
+        Assert.Equal("0202000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+        Assert.Equal(detects + 1, rig.Client.DetectBallCommands.Count);
+
+        await rig.Session.SetSwingStickAsync(true);
+        Assert.Equal(clubs + 1, rig.Client.ClubCommands.Count);
+
+        await rig.Session.SetClubAsync("0107");
+        Assert.Equal("0103000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+
+        await rig.Session.SetSwingStickAsync(false);
+        Assert.Equal("010700000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+    }
+
+    [Fact]
+    public async Task SwingStickFallsBackToTheClubCodeWhenTheClubHasNone()
+    {
+        await using var rig = await SessionRig.ConnectAsync(swingStick: true);
+
+        await rig.Session.SetClubAsync("0008");
+
+        Assert.Equal("000800000000", Convert.ToHexString(rig.Client.ClubCommands[^1][3..]));
+    }
+
+    [Fact]
     public async Task SpinModeIsUsedOnConnectAndReconnect()
     {
         await using var rig = await SessionRig.ConnectAsync(0);
@@ -265,11 +308,13 @@ public class SquareClubSessionTests
 
         public List<string> Logs { get; } = new();
 
-        public static async Task<SessionRig> ConnectAsync(int? spinMode = null)
+        public static async Task<SessionRig> ConnectAsync(int? spinMode = null, bool swingStick = false)
         {
             var rig = new SessionRig();
             if (spinMode.HasValue)
                 await rig.Session.SetSpinModeAsync(spinMode.Value);
+            if (swingStick)
+                await rig.Session.SetSwingStickAsync(true);
             await rig.Session.ConnectToDeviceAsync("square-home");
             Assert.True(rig.Client.Connected, "the session did not connect");
             rig._connected = true;
@@ -327,6 +372,8 @@ public class SquareClubSessionTests
 
         public List<byte[]> DetectBallCommands { get; } = new();
 
+        public List<byte[]> ClubCommands { get; } = new();
+
         // The command id (byte 1) of every write, in order.
         public List<byte> CommandIds { get; } = new();
 
@@ -346,6 +393,10 @@ public class SquareClubSessionTests
             if (value.Length > 4 && value[0] == 0x11 && value[1] == 0x81)
             {
                 DetectBallCommands.Add((byte[])value.Clone());
+            }
+            if (value.Length > 4 && value[0] == 0x11 && value[1] == 0x82)
+            {
+                ClubCommands.Add((byte[])value.Clone());
             }
             if (value.Length < 2 || value[0] != 0x11 || value[1] != 0x87)
             {

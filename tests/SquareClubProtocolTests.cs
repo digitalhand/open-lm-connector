@@ -32,6 +32,36 @@ public class SquareClubProtocolTests
         return frame;
     }
 
+    // The squaregolf-connector reference's SwingStickCommand cases: same 0x11 0x82
+    // command, the club's swing stick code, and one byte shorter than a club frame.
+    [Theory]
+    [InlineData(0, "0107", 0, "1182000103000000")]
+    [InlineData(5, "0204", 1, "1182050202010000")]
+    [InlineData(10, "0706", 0, "11820A0700000000")]
+    [InlineData(255, "0c06", 1, "1182FF0C00010000")]
+    public void SwingStick_BuildsTheReferenceFrame(byte sequence, string clubCode, int handedness, string expectedHex)
+    {
+        Assert.Equal(expectedHex, Convert.ToHexString(SquareCommandBuilder.SwingStick(sequence, clubCode, handedness)));
+    }
+
+    [Theory]
+    [InlineData("0305", "0301")]
+    [InlineData("0806", "0800")] // the reference lists 0900 (9 Iron's code) here
+    [InlineData("0906", "0900")]
+    [InlineData("0A06", "0a00")]
+    public void TryGetSwingStickCode_MapsARegularCode(string clubCode, string expected)
+    {
+        Assert.True(SquareCommandBuilder.TryGetSwingStickCode(clubCode, out var code));
+        Assert.Equal(expected, code);
+    }
+
+    [Fact]
+    public void SwingStick_RejectsAClubWithoutASwingStickCode()
+    {
+        Assert.False(SquareCommandBuilder.TryGetSwingStickCode("0008", out _));
+        Assert.Throws<ArgumentException>(() => SquareCommandBuilder.SwingStick(0, "0008", 0));
+    }
+
     [Fact]
     public void TryParseClub_DecodesAnglesInDegrees()
     {
